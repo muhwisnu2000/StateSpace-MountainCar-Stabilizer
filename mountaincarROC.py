@@ -1,4 +1,4 @@
-# Full-State Compensator
+# Reduced-Order Compensator
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -29,44 +29,57 @@ B = np.array([[0],
               [1/m]])
 C = np.array([[1, 0]]) # Diasumsikan hanya mengukur posisi (x)
 
-### Pole Placement ###
-# Poles Controller: Harus negatif agar stabil.
-# Poles Observer: Harus lebih negatif (lebih cepat) dari Controller.
+### Partisi Matriks untuk Reduces Order ###
 
-poles_controller = [-6, -7]       # Desain respon sistem
-poles_observer   = [-30, -31]     # Desain kecepatan estimasi
+# A11 = 0, A12 = 1 (Hubungan pos ke vel)
+# A21 = gk, A22 = 0 (Hubungan vel ke pos)
+A11 = A[0,0]
+A12 = A[0,1]
+A21 = A[1,0]
+A22 = A[1,1]
 
-# Hitung Gain K (Controller) 
-# place_poles menghitung K untuk (A - BK)
+# Gunakan indeks [row, col] agar dapat angka scalar
+B1 = B[0, 0] 
+B2 = B[1, 0]
+
+### Desain Gain ###
+
+# Controller Gain (K) - Full State Feedback
+poles_controller = [-6, -7] 
 res_k = place_poles(A, B, poles_controller)
 K = res_k.gain_matrix
-print(f"Controller Gain K: {K}")
 
-# Hitung Gain L (Observer) 
-# Kita gunakan transpose karena place_poles menyelesaikan A - BK, sedangkan observer A - LC
-res_l = place_poles(A.T, C.T, poles_observer)
-L = res_l.gain_matrix.T
-print(f"Observer Gain L: {L}")
+# Reduced Observer Gain (L)
+# Kita hanya butuh 1 pole karena hanya mengestimasi 1 state (kecepatan)
+pole_reduced = [-20] 
 
-### Implementasi Compensator ###
+# Rumus L untuk Reduced Order (s - (A22 - L*A12) = 0)
+L_scalar = (A22 - pole_reduced[0]) / A12
 
-# Variabel Global untuk menyimpan state estimasi (x_hat, v_hat)
-# Inisialisasi estimasi di 0
-observer_state = np.array([0.0, 0.0]) 
-last_t = 0
+print(f"Controller K: {K}")
+print(f"Reduced Observer L: {L_scalar}")
+
+### Implementasi Kendali ###
+
+# Variabel Global untuk Reduced Observer (State 'z')
+z_state = 0.0 
 
 # Placeholder untuk sistem kendali yang didefinisikan pengguna
 def control_system(t, y_measurement):
-    # Target (Puncak gunung & Diam)
-    desired_state = np.array([0.0, 0.0]) 
+    global z_state
     
-    # Hitung Error (State Estimasi - Target)
-    error = observer_state - desired_state
+    # Recover kecepatan (v_hat) 
+    # Rumus: v_hat = z + L * y
+    v_hat = z_state + L_scalar * y_measurement
     
-    # u = -K * error
-    u = -np.dot(K, error)
-
-    return u[0]
+    # Susun state lengkap [posisi_asli, kecepatan_estimasi]
+    # Gunakan posisi asli karena sensor dianggap akurat (Reduced Order)
+    full_state_estimate = np.array([y_measurement, v_hat])
+    
+    # 3. Hitung Force (u = -K * state)
+    u = -np.dot(K, full_state_estimate)
+    
+    return u[0] 
 
 # Dinamika state-space Mountain Car
 def mountain_car_dynamics(t, state):
@@ -79,7 +92,7 @@ def mountain_car_dynamics(t, state):
     - [v, a]: Turunan posisi dan kecepatan.
     """
     x, v = state
-    F = control_system(t, x)  
+    F = control_system(t, x)
     a = -g * np.cos(k * (x + peak_shift)) + F / m  # Percepatan dengan kendali
 
     # Tambahkan gangguan setiap disturbance_interval detik
@@ -99,15 +112,18 @@ def mountain_car_dynamics(t, state):
 # Kondisi awal
 initial_state = [np.random.uniform(-0.5, 0.5), 0.0] # Mulai acak
 current_state = initial_state.copy()
-observer_state = np.array([0.0, 0.0]) # Reset observer
-last_t = 0
+
+# Inisialisasi z agar v_hat awal = 0
+# 0 = z + L*y0  ->  z = -L*y0
+z_state = -L_scalar * initial_state[0]
+
 solution_time = [0]
 solution_states = [current_state]
-solution_estimated = [observer_state.copy()]
+solution_estimated = [current_state.copy()]
 
 # Fungsi solver untuk memperbarui state
 def update_solution():
-    global current_state, solution_time, solution_states, last_t, observer_state
+    global current_state, solution_time, solution_states, z_state
     
     t_curr = solution_time[-1]
     
@@ -116,29 +132,29 @@ def update_solution():
     y_measurement = current_state[0]                # Posisi asli (y)
     u_val = control_system(t_curr, y_measurement)   # Gaya yang diberikan (u)
     
-    # Rumus Observer: d_x_hat = A*x_hat + B*u + L(y - C*x_hat)
+   # Rumus Observer : dz/dt = (A22 - L*A12)*z + (Gain_Y)*y + (Gain_U)*u
     
-    # Hitung komponen rumus
-    y_hat = np.dot(C, observer_state)         # C * x_hat
-    error = y_measurement - y_hat             # (y - y_hat)
+    # Hitung gain matriks sementara
+    AR = A22 - L_scalar * A12
+    AY = AR * L_scalar + A21 - L_scalar * A11
+    BU = B2 - L_scalar * B1
     
-    term1 = np.dot(A, observer_state)         # A * x_hat
-    term2 = np.dot(B, [u_val]).flatten()      # B * u
-    term3 = np.dot(L, error).flatten()        # L * error
+    dz = AR * z_state + AY * y_measurement + BU * u_val
     
-    d_x_hat = term1 + term2 + term3           # Total Turunan
+    # Update Z
+    z_state = z_state + dz * dt
     
-    # Update State Observer (x_hat baru = x_hat lama + turunan * dt)
-    observer_state = observer_state + d_x_hat * dt
-    
-    # --- Update Plant (Mobil) ---
+    # Update Plant (Mobil)
     sol = solve_ivp(mountain_car_dynamics, [t_curr, t_curr + dt], current_state, t_eval=[t_curr + dt])
+    current_state = sol.y[:, -1]
     
-    if sol.y.size > 0:
-        current_state = sol.y[:, -1]
-        solution_time.append(sol.t[-1])
-        solution_states.append(current_state)
-        solution_estimated.append(observer_state.copy()) # Simpan log estimasi
+    # Simpan Data
+    solution_time.append(sol.t[-1])
+    solution_states.append(current_state)
+    
+    # Rekonstruksi v_hat untuk grafik
+    v_hat_now = z_state + L_scalar * current_state[0]
+    solution_estimated.append([current_state[0], v_hat_now])
 
 # Parameter simulasi
 t_span = (0, 15)  # Simulasikan selama 15 detik
@@ -146,7 +162,7 @@ dt = 0.01         # Langkah waktu
 
 ### VISUALISASI ###
 fig = plt.figure(figsize=(10, 8))
-fig.suptitle("Challenge 1: Full-State Compensator")
+fig.suptitle("Challenge 2: Reduced-Order Compensator")
 
 # Subplot 1: Animasi
 ax_anim = fig.add_subplot(2, 1, 1)
@@ -161,6 +177,7 @@ ax_pos.set_xlim(0, 15)
 ax_pos.set_ylim(-1.0, 1.0)
 ax_pos.set_xlabel("Time (s)")
 ax_pos.set_ylabel("Position (m)")
+ax_pos.set_title("Position Response")
 ax_pos.grid(True)
 
 # Subplot 3: Kecepatan
@@ -169,6 +186,7 @@ ax_vel.set_xlim(0, 15)
 ax_vel.set_ylim(-3, 3)
 ax_vel.set_xlabel("Time (s)")
 ax_vel.set_ylabel("Velocity (m/s)")
+ax_vel.set_title("Estimator Performance (Velocity)")
 ax_vel.grid(True)
 
 # Aset Gambar
@@ -176,11 +194,12 @@ mountain_x = np.linspace(-1.2, 1.2, 500)
 mountain_y = np.sin(k * (mountain_x + peak_shift)) / k
 ax_anim.plot(mountain_x, mountain_y, 'k-', lw=2)
 car, = ax_anim.plot([], [], 'ro', markersize=10, label='Real Car')
-est_car, = ax_anim.plot([], [], 'bx', markersize=8, alpha=0.5, label='Estimator')
-ax_anim.legend()
+est_car, = ax_anim.plot([], [], 'bx', markersize=8, alpha=0.5, label='Reduced Est')
+ax_anim.legend(loc='upper right')
 
 line_pos, = ax_pos.plot([], [], 'b-', lw=2, label='True Position')
 ax_pos.plot([0, 15], [0, 0], 'r--', alpha=0.7, label='Target')
+ax_pos.legend()
 
 line_true_vel, = ax_vel.plot([], [], 'g-', lw=2, label='True Velocity')
 line_est_vel, = ax_vel.plot([], [], 'r--', lw=2, label='Est Velocity')
