@@ -146,7 +146,7 @@ dt = 0.01         # Langkah waktu
 
 # --- 5. VISUALISASI ---
 fig = plt.figure(figsize=(10, 8))
-fig.suptitle("Challenge 1: FSC (Default Backend)")
+fig.suptitle("Challenge 1: Full-State Compensator")
 
 # Subplot 1: Animasi
 ax_anim = fig.add_subplot(2, 1, 1)
