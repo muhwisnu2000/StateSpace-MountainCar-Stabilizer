@@ -57,47 +57,15 @@ last_t = 0
 
 # Placeholder untuk sistem kendali yang didefinisikan pengguna
 def control_system(t, y_measurement):
-    """
-    Fungsi ini menggabungkan Observer dan Controller.
-    Input: y_measurement (Hanya posisi x dari sensor)
-    Output: Force (F)
-    """
+    # Target (Puncak gunung & Diam)
+    desired_state = np.array([0.0, 0.0]) 
     
-    global observer_state, last_t
+    # Hitung Error (State Estimasi - Target)
+    error = observer_state - desired_state
     
-    # Hitung dt (delta time) untuk update integral observer
-    dt = t - last_t
-    if dt <= 0: dt = 0.01 # Fallback untuk langkah pertama
-    last_t = t
+    # u = -K * error
+    u = -np.dot(K, error)
 
-    # 1. STATE ESTIMATOR (OBSERVER)
-    # Rumus: d(x_hat)/dt = A*x_hat + B*u + L(y - C*x_hat)
-    # y = y_measurement (posisi aktual dari sensor)
-    
-    # Prediksi Output Estimasi (y_hat)
-    y_hat = np.dot(C, observer_state) # C * x_hat
-    
-    # Error Estimasi (Sensor - Estimasi)
-    estimation_error = y_measurement - y_hat
-    
-    # Hitung Kontrol (u) berdasarkan state estimasi SEBELUM update
-    # u = -K * x_hat
-    u = -np.dot(K, observer_state)
-    
-    # Hitung Turunan State Estimasi (d_x_hat)
-    # A*x_hat
-    term1 = np.dot(A, observer_state)
-    # B*u
-    term2 = np.dot(B, u).flatten() # flatten agar jadi vektor 1D
-    # L(y - y_hat)
-    term3 = np.dot(L, estimation_error).flatten()
-    
-    d_x_hat = term1 + term2 + term3
-    
-    # Update State Estimasi (Integrasi Euler Sederhana)
-    observer_state = observer_state + d_x_hat * dt
-    
-    # Kembalikan gaya u (scalar)
     return u[0]
 
 # Dinamika state-space Mountain Car
@@ -129,7 +97,7 @@ def mountain_car_dynamics(t, state):
 # Tidak diperlukan karena mobil tidak akan bergerak keluar frame (Kendali sudah diterapkan)
 
 # Kondisi awal
-initial_state = [-0.5, 0.0] # Mulai acak
+initial_state = [np.random.uniform(-0.5, 0.5), 0.0] # Mulai acak
 current_state = initial_state.copy()
 observer_state = np.array([0.0, 0.0]) # Reset observer
 last_t = 0
@@ -139,10 +107,31 @@ solution_estimated = [observer_state.copy()]
 
 # Fungsi solver untuk memperbarui state
 def update_solution():
-    global current_state, solution_time, solution_states, last_t
+    global current_state, solution_time, solution_states, last_t, observer_state
+    
     t_curr = solution_time[-1]
     
-    # Solve untuk time step berikutnya
+    # --- Update Observer ---
+    # Ambil data yang dibutuhkan
+    y_measurement = current_state[0]                # Posisi asli (y)
+    u_val = control_system(t_curr, y_measurement)   # Gaya yang diberikan (u)
+    
+    # Rumus Observer: d_x_hat = A*x_hat + B*u + L(y - C*x_hat)
+    
+    # Hitung komponen rumus
+    y_hat = np.dot(C, observer_state)         # C * x_hat
+    error = y_measurement - y_hat             # (y - y_hat)
+    
+    term1 = np.dot(A, observer_state)         # A * x_hat
+    term2 = np.dot(B, [u_val]).flatten()      # B * u
+    term3 = np.dot(L, error).flatten()        # L * error
+    
+    d_x_hat = term1 + term2 + term3           # Total Turunan
+    
+    # Update State Observer (x_hat baru = x_hat lama + turunan * dt)
+    observer_state = observer_state + d_x_hat * dt
+    
+    # --- Update Plant (Mobil) ---
     sol = solve_ivp(mountain_car_dynamics, [t_curr, t_curr + dt], current_state, t_eval=[t_curr + dt])
     
     if sol.y.size > 0:
@@ -155,46 +144,80 @@ def update_solution():
 t_span = (0, 15)  # Simulasikan selama 15 detik
 dt = 0.01         # Langkah waktu
 
-# Visualisasi: Animasikan Mountain Car
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.set_xlim(-1.2, 1.2)
-ax.set_ylim(-1.0, 1.0)
-ax.set_xlabel("Position (x)")
-ax.set_ylabel("Height")
-ax.set_title("Challenge 1: Full-State Compensator (Stabilizing at Peak)")
+# --- 5. VISUALISASI ---
+fig = plt.figure(figsize=(10, 8))
+fig.suptitle("Challenge 1: FSC (Default Backend)")
 
-# Representasi Gunung dan Mobil
+# Subplot 1: Animasi
+ax_anim = fig.add_subplot(2, 1, 1)
+ax_anim.set_xlim(-1.2, 1.2)
+ax_anim.set_ylim(-1.0, 1.0)
+ax_anim.set_ylabel("Height")
+ax_anim.set_title("Simulation Animation")
+
+# Subplot 2: Posisi
+ax_pos = fig.add_subplot(2, 2, 3)
+ax_pos.set_xlim(0, 15)
+ax_pos.set_ylim(-1.0, 1.0)
+ax_pos.set_xlabel("Time (s)")
+ax_pos.set_ylabel("Position (m)")
+ax_pos.grid(True)
+
+# Subplot 3: Kecepatan
+ax_vel = fig.add_subplot(2, 2, 4)
+ax_vel.set_xlim(0, 15)
+ax_vel.set_ylim(-3, 3)
+ax_vel.set_xlabel("Time (s)")
+ax_vel.set_ylabel("Velocity (m/s)")
+ax_vel.grid(True)
+
+# Aset Gambar
 mountain_x = np.linspace(-1.2, 1.2, 500)
-mountain_y = np.sin(k * (mountain_x + peak_shift)) / k  # Profil gunung yang disesuaikan
-car, = ax.plot([], [], 'ro', markersize=8, label='Real Car') # Visualisasi Mobil
-est_car, = ax.plot([], [], 'bx', markersize=8, alpha=0.5, label='Estimated State') # Visualisasi Estimator
-mountain_line, = ax.plot(mountain_x, mountain_y, 'k-', lw=2)
-ax.legend()
-ax.grid(True)
+mountain_y = np.sin(k * (mountain_x + peak_shift)) / k
+ax_anim.plot(mountain_x, mountain_y, 'k-', lw=2)
+car, = ax_anim.plot([], [], 'ro', markersize=10, label='Real Car')
+est_car, = ax_anim.plot([], [], 'bx', markersize=8, alpha=0.5, label='Estimator')
+ax_anim.legend()
 
-# Inisialisasi animasi
+line_pos, = ax_pos.plot([], [], 'b-', lw=2, label='True Position')
+ax_pos.plot([0, 15], [0, 0], 'r--', alpha=0.7, label='Target')
+
+line_true_vel, = ax_vel.plot([], [], 'g-', lw=2, label='True Velocity')
+line_est_vel, = ax_vel.plot([], [], 'r--', lw=2, label='Est Velocity')
+ax_vel.legend()
+
 def init():
     car.set_data([], [])
     est_car.set_data([], [])
-    return car, est_car
+    line_pos.set_data([], [])
+    line_true_vel.set_data([], [])
+    line_est_vel.set_data([], [])
+    return car, est_car, line_pos, line_true_vel, line_est_vel
 
-# Fungsi update untuk animasi
 def update(frame):
     update_solution()
     
-    # Real Car
     car_x = current_state[0]
     car_y = np.sin(k * (car_x + peak_shift)) / k
     car.set_data([car_x], [car_y])
     
-    # Estimated Car (Melihat apakah estimator akurat)
     est_x = solution_estimated[-1][0]
     est_y = np.sin(k * (est_x + peak_shift)) / k
     est_car.set_data([est_x], [est_y])
     
-    return car, est_car
+    times = solution_time
+    states_arr = np.array(solution_states)
+    est_arr = np.array(solution_estimated)
+    
+    if len(states_arr) > 1:
+        line_pos.set_data(times, states_arr[:, 0])
+        line_true_vel.set_data(times, states_arr[:, 1])
+        line_est_vel.set_data(times, est_arr[:, 1])
+    
+    return car, est_car, line_pos, line_true_vel, line_est_vel
 
-# Buat animasi
-ani = animation.FuncAnimation(fig, update, frames=400, init_func=init, blit=True, interval=20)
+ani = animation.FuncAnimation(fig, update, frames=750, init_func=init, blit=False, interval=20)
+
+print("Membuka window grafik...")
 
 plt.show()
